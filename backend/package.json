@@ -1,0 +1,23 @@
+{
+  "name": "ai-viva-examiner-backend",
+  "version": "1.0.0",
+  "description": "Backend API server for AI Viva Examiner powered by Google Gemini",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node --check server.js && node --check routes/vivaRoutes.js && node --check services/geminiService.js && node --check middleware/errorHandler.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0"
+  }
+}
