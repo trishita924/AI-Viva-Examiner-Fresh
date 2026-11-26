@@ -10,9 +10,10 @@ import { AppError } from '../middleware/errorHandler.js';
 
 const router = Router();
 
-const MAX_NOTES_CHARS = 40000;
-const MIN_NOTES_CHARS = 50;
-const MAX_ANSWER_CHARS = 5000;
+export const MAX_NOTES_CHARS = 40000;
+export const MIN_NOTES_CHARS = 50;
+export const MAX_ANSWER_CHARS = 5000;
+const MAX_QUESTION_CHARS = 2000;
 
 /**
  * GET /api/health
@@ -36,7 +37,7 @@ router.post('/generate-question', async (req, res, next) => {
   try {
     const { notes, questionNumber, totalQuestions = 5, previousQuestions = [] } = req.body || {};
 
-    if (typeof notes !== 'string' || notes.trim().length < MIN_NOTES_CHARS) {
+    if (typeof notes !== 'string') {
       throw new AppError(
         `Study notes must be a string with at least ${MIN_NOTES_CHARS} characters.`,
         400,
@@ -44,7 +45,16 @@ router.post('/generate-question', async (req, res, next) => {
       );
     }
 
-    if (notes.length > MAX_NOTES_CHARS) {
+    const trimmedNotes = notes.trim();
+    if (trimmedNotes.length < MIN_NOTES_CHARS) {
+      throw new AppError(
+        `Study notes must be a string with at least ${MIN_NOTES_CHARS} characters.`,
+        400,
+        'INVALID_NOTES'
+      );
+    }
+
+    if (trimmedNotes.length > MAX_NOTES_CHARS) {
       throw new AppError(
         `Study notes exceed the maximum allowed length of ${MAX_NOTES_CHARS} characters.`,
         400,
@@ -66,14 +76,14 @@ router.post('/generate-question', async (req, res, next) => {
     }
 
     const sanitizedPrevious = previousQuestions
-      .filter((item) => item && typeof item.question === 'string')
+      .filter((item) => item && typeof item.question === 'string' && item.question.trim())
       .map((item) => ({
-        topic: typeof item.topic === 'string' ? item.topic.slice(0, 120) : '',
-        question: item.question.slice(0, 500)
+        topic: typeof item.topic === 'string' ? item.topic.trim().slice(0, 120) : '',
+        question: item.question.trim().slice(0, 500)
       }));
 
     const question = await generateQuestion({
-      notes: notes.trim(),
+      notes: trimmedNotes,
       questionNumber: qNum,
       totalQuestions: total,
       previousQuestions: sanitizedPrevious
@@ -105,32 +115,49 @@ router.post('/evaluate-answer', async (req, res, next) => {
     if (typeof notes !== 'string' || notes.trim().length < MIN_NOTES_CHARS) {
       throw new AppError('Valid study notes are required for evaluation.', 400, 'INVALID_NOTES');
     }
-    if (notes.length > MAX_NOTES_CHARS) {
+    const trimmedNotes = notes.trim();
+    if (trimmedNotes.length > MAX_NOTES_CHARS) {
       throw new AppError('Study notes exceed maximum allowed length.', 400, 'NOTES_TOO_LARGE');
     }
     if (typeof question !== 'string' || !question.trim()) {
       throw new AppError('Question text is required.', 400, 'INVALID_QUESTION');
     }
+    if (question.trim().length > MAX_QUESTION_CHARS) {
+      throw new AppError(`Question exceeds maximum length of ${MAX_QUESTION_CHARS} characters.`, 400, 'QUESTION_TOO_LARGE');
+    }
     if (typeof answer !== 'string' || !answer.trim()) {
       throw new AppError('Student answer cannot be empty.', 400, 'EMPTY_ANSWER');
     }
-    if (answer.length > MAX_ANSWER_CHARS) {
+    const trimmedAnswer = answer.trim();
+    if (trimmedAnswer.length > MAX_ANSWER_CHARS) {
       throw new AppError(`Answer exceeds maximum length of ${MAX_ANSWER_CHARS} characters.`, 400, 'ANSWER_TOO_LARGE');
+    }
+    if (typeof isFollowUp !== 'boolean') {
+      throw new AppError('isFollowUp must be a boolean.', 400, 'INVALID_FOLLOWUP_FLAG');
     }
 
     if (isFollowUp && (typeof originalAnswer !== 'string' || !originalAnswer.trim())) {
       throw new AppError('originalAnswer is required when evaluating a follow-up.', 400, 'MISSING_ORIGINAL_ANSWER');
     }
+    if (isFollowUp && originalAnswer.trim().length > MAX_ANSWER_CHARS) {
+      throw new AppError(`originalAnswer exceeds maximum length of ${MAX_ANSWER_CHARS} characters.`, 400, 'ANSWER_TOO_LARGE');
+    }
+    if (isFollowUp && (typeof followUpQuestion !== 'string' || !followUpQuestion.trim())) {
+      throw new AppError('followUpQuestion is required when evaluating a follow-up.', 400, 'MISSING_FOLLOWUP_QUESTION');
+    }
+
+    const parsedFollowUpCount = Number(followUpCount);
+    const safeFollowUpCount = Number.isFinite(parsedFollowUpCount) && parsedFollowUpCount >= 0 ? parsedFollowUpCount : 0;
 
     const evaluation = await evaluateAnswer({
-      notes: notes.trim(),
+      notes: trimmedNotes,
       question: question.trim(),
-      topic: typeof topic === 'string' ? topic.trim().slice(0, 120) : 'General',
-      answer: answer.trim(),
-      isFollowUp: Boolean(isFollowUp),
+      topic: typeof topic === 'string' && topic.trim() ? topic.trim().slice(0, 120) : 'General',
+      answer: trimmedAnswer,
+      isFollowUp,
       originalAnswer: typeof originalAnswer === 'string' ? originalAnswer.trim().slice(0, MAX_ANSWER_CHARS) : '',
       followUpQuestion: typeof followUpQuestion === 'string' ? followUpQuestion.trim().slice(0, 500) : '',
-      followUpCount: Number(followUpCount) || 0
+      followUpCount: safeFollowUpCount
     });
 
     res.json({ evaluation });
@@ -153,7 +180,13 @@ router.post('/generate-report', async (req, res, next) => {
 
     for (let i = 0; i < evaluations.length; i += 1) {
       const ev = evaluations[i];
-      if (!ev || typeof ev.question !== 'string' || typeof ev.score !== 'number' || Number.isNaN(ev.score)) {
+      if (
+        !ev ||
+        typeof ev.question !== 'string' ||
+        !ev.question.trim() ||
+        typeof ev.score !== 'number' ||
+        !Number.isFinite(ev.score)
+      ) {
         throw new AppError(`Evaluation at index ${i} is missing required fields (question, numeric score).`, 400, 'INVALID_EVALUATION_ITEM');
       }
     }

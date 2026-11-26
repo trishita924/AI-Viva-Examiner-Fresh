@@ -13,7 +13,7 @@ export class AppError extends Error {
 /**
  * 404 Not Found middleware for unmatched routes.
  */
-export function notFoundHandler(req, res, next) {
+export function notFoundHandler(req, res, _next) {
   res.status(404).json({
     error: {
       code: 'NOT_FOUND',
@@ -27,8 +27,8 @@ export function notFoundHandler(req, res, next) {
  * Never logs private student content or exposes stack traces in production.
  */
 export function errorHandler(err, req, res, _next) {
-  // Handle malformed JSON body
-  if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+  // Handle malformed JSON body from express.json()
+  if (err.type === 'entity.parse.failed' || (err instanceof SyntaxError && err.status === 400 && 'body' in err)) {
     return res.status(400).json({
       error: {
         code: 'INVALID_JSON',

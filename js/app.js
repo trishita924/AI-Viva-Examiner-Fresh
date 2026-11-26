@@ -11,9 +11,11 @@ import {
   extractTextFromFile,
   countWords,
   MIN_NOTES_CHARS,
-  MAX_EXTRACTED_CHARS
+  MAX_EXTRACTED_CHARS,
+  MAX_ANSWER_CHARS
 } from './file-extractor.js';
 import {
+  hasSavedBackendUrl,
   getVivaHistory,
   saveVivaHistoryItem,
   clearVivaHistory
@@ -27,6 +29,8 @@ const state = {
   backendConnected: false,
   geminiConfigured: false,
   isBusy: false,
+  examSessionId: 0,
+  activeExamController: null,
   exam: {
     currentQuestionNumber: 0,
     currentQuestion: null,
@@ -75,6 +79,10 @@ const dom = {
   runningTotalBadge: document.getElementById('running-total-badge'),
   exitVivaBtn: document.getElementById('exit-viva-btn'),
   examErrorBanner: document.getElementById('exam-error-banner'),
+  examErrorActions: document.getElementById('exam-error-actions'),
+  retryQuestionBtn: document.getElementById('retry-question-btn'),
+  errorExitVivaBtn: document.getElementById('error-exit-viva-btn'),
+  questionCard: document.getElementById('question-card'),
   questionTopicBadge: document.getElementById('question-topic-badge'),
   questionTypeBadge: document.getElementById('question-type-badge'),
   questionLoading: document.getElementById('question-loading'),
@@ -98,6 +106,9 @@ const dom = {
   // Report
   reportLoading: document.getElementById('report-loading'),
   reportErrorBanner: document.getElementById('report-error-banner'),
+  reportErrorActions: document.getElementById('report-error-actions'),
+  retryReportBtn: document.getElementById('retry-report-btn'),
+  reportBackBtn: document.getElementById('report-back-btn'),
   reportContent: document.getElementById('report-content'),
   reportClassification: document.getElementById('report-classification'),
   reportSummary: document.getElementById('report-summary'),
@@ -131,13 +142,53 @@ function showBanner(el, message, variant = 'error') {
   el.classList.remove('hidden');
 }
 
+function abortActiveExamRequests() {
+  if (state.activeExamController) {
+    state.activeExamController.abort();
+    state.activeExamController = null;
+  }
+}
+
+function createExamAbortSignal() {
+  abortActiveExamRequests();
+  state.activeExamController = new AbortController();
+  return state.activeExamController.signal;
+}
+
+function exitToSetup() {
+  state.examSessionId += 1;
+  abortActiveExamRequests();
+  state.isBusy = false;
+  dom.startVivaBtn.disabled = false;
+  dom.submitAnswerBtn.disabled = false;
+  dom.submitAnswerBtn.textContent = 'Submit Answer';
+  dom.submitFollowupBtn.disabled = false;
+  dom.submitFollowupBtn.textContent = 'Submit Follow-Up';
+  showBanner(dom.examErrorBanner, '');
+  dom.examErrorActions.classList.add('hidden');
+  showBanner(dom.reportErrorBanner, '');
+  dom.reportErrorActions.classList.add('hidden');
+  showView('setup');
+}
+
 function updateNotesMetrics() {
   const text = dom.notesTextarea.value;
+  const trimmedLen = text.trim().length;
   state.notes = text;
   const words = countWords(text);
+
   dom.fileNameBadge.textContent = `Source: ${state.sourceName}`;
   dom.wordCountBadge.textContent = `${words.toLocaleString()} words`;
-  dom.charCountBadge.textContent = `${text.length.toLocaleString()} / ${MAX_EXTRACTED_CHARS.toLocaleString()} chars`;
+  dom.charCountBadge.textContent = `${trimmedLen.toLocaleString()} / ${MAX_EXTRACTED_CHARS.toLocaleString()} chars`;
+
+  dom.charCountBadge.classList.remove('is-warning', 'is-error', 'is-valid');
+  if (trimmedLen > MAX_EXTRACTED_CHARS) {
+    dom.charCountBadge.classList.add('is-error');
+  } else if (trimmedLen > 0 && trimmedLen < MIN_NOTES_CHARS) {
+    dom.charCountBadge.classList.add('is-warning');
+  } else if (trimmedLen >= MIN_NOTES_CHARS) {
+    dom.charCountBadge.classList.add('is-valid');
+  }
 }
 
 function setConnectionStatus({ connected, geminiConfigured = false, model = '', message = '' }) {
@@ -165,33 +216,87 @@ function setConnectionStatus({ connected, geminiConfigured = false, model = '', 
   }
 }
 
-async function testBackendConnection() {
+function getLocalFallbackCandidate(primaryUrl) {
+  if (typeof window === 'undefined' || !window.location) return '';
+  const { protocol, hostname, origin } = window.location;
+  if ((protocol !== 'http:' && protocol !== 'https:') || (hostname !== 'localhost' && hostname !== '127.0.0.1')) {
+    return '';
+  }
+  const defaultBackend = `http://${hostname}:3001`;
+  if (primaryUrl === origin && primaryUrl !== defaultBackend) {
+    return defaultBackend;
+  }
+  if (primaryUrl !== origin) {
+    return origin;
+  }
+  return '';
+}
+
+async function testBackendConnection({ allowLocalFallback = false } = {}) {
   const currentUrl = getBackendBaseUrl();
   if (!currentUrl) {
     setConnectionStatus({
       connected: false,
       message: 'Enter your Render or local backend URL and click Connect.'
     });
-    return;
+    return false;
   }
 
   dom.connectionText.textContent = 'Connecting...';
+  dom.saveConnectBtn.disabled = true;
+  dom.saveConnectBtn.textContent = 'Connecting...';
+
   try {
     const data = await checkHealth();
     const configured = Boolean(data.geminiConfigured);
     setConnectionStatus({
       connected: true,
       geminiConfigured: configured,
-      model: data.model || 'gemini-2.5-flash',
+      model: data.model || 'gemini-3.8-flash',
       message: configured
-        ? `Connected to ${currentUrl} (Model: ${data.model}).`
-        : 'Backend reachable, but the server Gemini API key is not configured.'
+        ? `Connected to ${currentUrl} (Model: ${data.model || 'gemini-3.8-flash'}).`
+        : 'Backend reachable, but GEMINI_API_KEY is not configured in backend/.env.'
     });
+    return true;
   } catch (err) {
+    if (err.code === 'ABORTED') {
+      return false;
+    }
+
+    // If user hasn't saved a custom URL and is on localhost, auto-probe the alternate local candidate
+    if (allowLocalFallback && !hasSavedBackendUrl()) {
+      const fallbackUrl = getLocalFallbackCandidate(currentUrl);
+      if (fallbackUrl) {
+        try {
+          const data = await checkHealth({ baseUrlOverride: fallbackUrl });
+          if (data?.service === 'ai-viva-examiner-backend') {
+            setBackendBaseUrl(fallbackUrl);
+            dom.backendUrlInput.value = fallbackUrl;
+            const configured = Boolean(data.geminiConfigured);
+            setConnectionStatus({
+              connected: true,
+              geminiConfigured: configured,
+              model: data.model || 'gemini-3.8-flash',
+              message: configured
+                ? `Connected to ${fallbackUrl} (Model: ${data.model || 'gemini-3.8-flash'}).`
+                : 'Backend reachable, but GEMINI_API_KEY is not configured in backend/.env.'
+            });
+            return true;
+          }
+        } catch {
+          // Keep original error feedback below
+        }
+      }
+    }
+
     setConnectionStatus({
       connected: false,
       message: err.message
     });
+    return false;
+  } finally {
+    dom.saveConnectBtn.disabled = false;
+    dom.saveConnectBtn.textContent = 'Connect';
   }
 }
 
@@ -274,11 +379,14 @@ function updateExamHeader() {
   dom.runningTotalBadge.textContent = `Running Total: ${computeRunningTotal()} / 25`;
 }
 
-async function loadNextQuestion() {
+async function loadNextQuestion({ isRetry = false } = {}) {
   if (state.isBusy) return;
+  const sessionId = state.examSessionId;
   state.isBusy = true;
 
-  state.exam.currentQuestionNumber += 1;
+  if (!isRetry) {
+    state.exam.currentQuestionNumber += 1;
+  }
   state.exam.currentQuestion = null;
   state.exam.originalAnswer = '';
   state.exam.followUpQuestion = '';
@@ -287,10 +395,12 @@ async function loadNextQuestion() {
 
   updateExamHeader();
   showBanner(dom.examErrorBanner, '');
+  dom.examErrorActions.classList.add('hidden');
 
   dom.questionText.textContent = '';
   dom.questionTopicBadge.textContent = 'Loading topic...';
   dom.questionTypeBadge.textContent = '...';
+  dom.questionCard.classList.remove('hidden');
   dom.questionLoading.classList.remove('hidden');
 
   dom.primaryAnswerBox.classList.add('hidden');
@@ -298,6 +408,8 @@ async function loadNextQuestion() {
   dom.feedbackCard.classList.add('hidden');
   dom.answerTextarea.value = '';
   dom.followupTextarea.value = '';
+
+  const signal = createExamAbortSignal();
 
   try {
     const previousQuestions = state.exam.evaluations.map((ev) => ({
@@ -309,8 +421,11 @@ async function loadNextQuestion() {
       notes: state.notes,
       questionNumber: state.exam.currentQuestionNumber,
       totalQuestions: TOTAL_QUESTIONS,
-      previousQuestions
+      previousQuestions,
+      signal
     });
+
+    if (sessionId !== state.examSessionId) return;
 
     const q = data.question;
     state.exam.currentQuestion = q;
@@ -322,10 +437,15 @@ async function loadNextQuestion() {
     dom.primaryAnswerBox.classList.remove('hidden');
     dom.answerTextarea.focus();
   } catch (err) {
+    if (sessionId !== state.examSessionId || err.code === 'ABORTED') return;
     dom.questionLoading.classList.add('hidden');
+    dom.questionCard.classList.add('hidden');
     showBanner(dom.examErrorBanner, err.message, 'error');
+    dom.examErrorActions.classList.remove('hidden');
   } finally {
-    state.isBusy = false;
+    if (sessionId === state.examSessionId) {
+      state.isBusy = false;
+    }
   }
 }
 
@@ -364,11 +484,19 @@ async function handleAnswerSubmit() {
     showBanner(dom.examErrorBanner, 'Please write your answer before submitting.', 'warning');
     return;
   }
+  if (answer.length > MAX_ANSWER_CHARS) {
+    showBanner(dom.examErrorBanner, `Answer exceeds the maximum length of ${MAX_ANSWER_CHARS.toLocaleString()} characters.`, 'warning');
+    return;
+  }
 
+  const sessionId = state.examSessionId;
   showBanner(dom.examErrorBanner, '');
+  dom.examErrorActions.classList.add('hidden');
   state.isBusy = true;
   dom.submitAnswerBtn.disabled = true;
   dom.submitAnswerBtn.textContent = 'Evaluating...';
+
+  const signal = createExamAbortSignal();
 
   try {
     const data = await evaluateAnswer({
@@ -377,8 +505,11 @@ async function handleAnswerSubmit() {
       topic: state.exam.currentQuestion.topic,
       answer,
       isFollowUp: false,
-      followUpCount: state.exam.followUpCount
+      followUpCount: state.exam.followUpCount,
+      signal
     });
+
+    if (sessionId !== state.examSessionId) return;
 
     const ev = data.evaluation;
     state.exam.originalAnswer = answer;
@@ -403,11 +534,14 @@ async function handleAnswerSubmit() {
       });
     }
   } catch (err) {
+    if (sessionId !== state.examSessionId || err.code === 'ABORTED') return;
     showBanner(dom.examErrorBanner, err.message, 'error');
   } finally {
-    state.isBusy = false;
-    dom.submitAnswerBtn.disabled = false;
-    dom.submitAnswerBtn.textContent = 'Submit Answer';
+    if (sessionId === state.examSessionId) {
+      state.isBusy = false;
+      dom.submitAnswerBtn.disabled = false;
+      dom.submitAnswerBtn.textContent = 'Submit Answer';
+    }
   }
 }
 
@@ -418,11 +552,19 @@ async function handleFollowupSubmit() {
     showBanner(dom.examErrorBanner, 'Please write your follow-up response before submitting.', 'warning');
     return;
   }
+  if (followUpAnswer.length > MAX_ANSWER_CHARS) {
+    showBanner(dom.examErrorBanner, `Follow-up answer exceeds the maximum length of ${MAX_ANSWER_CHARS.toLocaleString()} characters.`, 'warning');
+    return;
+  }
 
+  const sessionId = state.examSessionId;
   showBanner(dom.examErrorBanner, '');
+  dom.examErrorActions.classList.add('hidden');
   state.isBusy = true;
   dom.submitFollowupBtn.disabled = true;
   dom.submitFollowupBtn.textContent = 'Evaluating...';
+
+  const signal = createExamAbortSignal();
 
   try {
     const data = await evaluateAnswer({
@@ -433,9 +575,13 @@ async function handleFollowupSubmit() {
       isFollowUp: true,
       originalAnswer: state.exam.originalAnswer,
       followUpQuestion: state.exam.followUpQuestion,
-      followUpCount: state.exam.followUpCount
+      followUpCount: state.exam.followUpCount,
+      signal
     });
 
+    if (sessionId !== state.examSessionId) return;
+
+    state.exam.awaitingFollowUp = false;
     dom.followupCard.classList.add('hidden');
     finalizeQuestionEvaluation({
       evaluation: data.evaluation,
@@ -444,11 +590,14 @@ async function handleFollowupSubmit() {
       followUpAnswer
     });
   } catch (err) {
+    if (sessionId !== state.examSessionId || err.code === 'ABORTED') return;
     showBanner(dom.examErrorBanner, err.message, 'error');
   } finally {
-    state.isBusy = false;
-    dom.submitFollowupBtn.disabled = false;
-    dom.submitFollowupBtn.textContent = 'Submit Follow-Up';
+    if (sessionId === state.examSessionId) {
+      state.isBusy = false;
+      dom.submitFollowupBtn.disabled = false;
+      dom.submitFollowupBtn.textContent = 'Submit Follow-Up';
+    }
   }
 }
 
@@ -484,15 +633,21 @@ function renderInsightList(ulElement, items, fallbackText) {
 
 async function finishAndShowReport() {
   if (state.isBusy) return;
+  const sessionId = state.examSessionId;
   state.isBusy = true;
 
   showView('report');
   dom.reportLoading.classList.remove('hidden');
   dom.reportContent.classList.add('hidden');
+  dom.reportErrorActions.classList.add('hidden');
   showBanner(dom.reportErrorBanner, '');
 
+  const signal = createExamAbortSignal();
+
   try {
-    const data = await generateReport({ evaluations: state.exam.evaluations });
+    const data = await generateReport({ evaluations: state.exam.evaluations, signal });
+    if (sessionId !== state.examSessionId) return;
+
     const report = data.report;
 
     dom.reportClassification.textContent = report.classification;
@@ -566,14 +721,19 @@ async function finishAndShowReport() {
     dom.reportLoading.classList.add('hidden');
     dom.reportContent.classList.remove('hidden');
   } catch (err) {
+    if (sessionId !== state.examSessionId || err.code === 'ABORTED') return;
     dom.reportLoading.classList.add('hidden');
     showBanner(dom.reportErrorBanner, err.message, 'error');
+    dom.reportErrorActions.classList.remove('hidden');
   } finally {
-    state.isBusy = false;
+    if (sessionId === state.examSessionId) {
+      state.isBusy = false;
+    }
   }
 }
 
 async function startVivaSession() {
+  if (state.isBusy) return;
   showBanner(dom.setupErrorBanner, '');
   const notes = dom.notesTextarea.value.trim();
 
@@ -595,43 +755,64 @@ async function startVivaSession() {
     return;
   }
 
-  if (!state.backendConnected || !state.geminiConfigured) {
-    await testBackendConnection();
+  state.isBusy = true;
+  dom.startVivaBtn.disabled = true;
+
+  try {
     if (!state.backendConnected || !state.geminiConfigured) {
-      showBanner(
-        dom.setupErrorBanner,
-        'Cannot start viva: the Gemini backend is offline or missing the server Gemini API key.',
-        'error'
-      );
-      return;
+      await testBackendConnection({ allowLocalFallback: true });
+      if (!state.backendConnected || !state.geminiConfigured) {
+        showBanner(
+          dom.setupErrorBanner,
+          state.backendConnected && !state.geminiConfigured
+            ? 'Cannot start viva: the backend server is running, but GEMINI_API_KEY is missing in backend/.env.'
+            : 'Cannot start viva: the Gemini backend is offline or unreachable.',
+          'error'
+        );
+        return;
+      }
     }
+
+    state.notes = notes;
+    state.examSessionId += 1;
+    state.exam = {
+      currentQuestionNumber: 0,
+      currentQuestion: null,
+      originalAnswer: '',
+      followUpQuestion: '',
+      followUpCount: 0,
+      awaitingFollowUp: false,
+      evaluations: []
+    };
+
+    showView('exam');
+  } finally {
+    state.isBusy = false;
+    dom.startVivaBtn.disabled = false;
   }
 
-  state.notes = notes;
-  state.exam = {
-    currentQuestionNumber: 0,
-    currentQuestion: null,
-    originalAnswer: '',
-    followUpQuestion: '',
-    followUpCount: 0,
-    awaitingFollowUp: false,
-    evaluations: []
-  };
-
-  showView('exam');
   await loadNextQuestion();
+}
+
+async function connectWithInputUrl() {
+  const check = validateBackendUrl(dom.backendUrlInput.value);
+  if (!check.valid) {
+    setConnectionStatus({ connected: false, message: check.error });
+    return;
+  }
+  dom.backendUrlInput.value = check.url;
+  setBackendBaseUrl(check.url);
+  await testBackendConnection({ allowLocalFallback: false });
 }
 
 function bindEvents() {
   // Backend URL save & connect
-  dom.saveConnectBtn.addEventListener('click', async () => {
-    const check = validateBackendUrl(dom.backendUrlInput.value);
-    if (!check.valid) {
-      setConnectionStatus({ connected: false, message: check.error });
-      return;
+  dom.saveConnectBtn.addEventListener('click', connectWithInputUrl);
+  dom.backendUrlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      connectWithInputUrl();
     }
-    setBackendBaseUrl(check.url);
-    await testBackendConnection();
   });
 
   // File upload interactions
@@ -703,6 +884,26 @@ function bindEvents() {
   dom.submitAnswerBtn.addEventListener('click', handleAnswerSubmit);
   dom.submitFollowupBtn.addEventListener('click', handleFollowupSubmit);
 
+  dom.answerTextarea.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      handleAnswerSubmit();
+    }
+  });
+
+  dom.followupTextarea.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      handleFollowupSubmit();
+    }
+  });
+
+  dom.retryQuestionBtn.addEventListener('click', () => {
+    loadNextQuestion({ isRetry: true });
+  });
+
+  dom.errorExitVivaBtn.addEventListener('click', exitToSetup);
+
   dom.nextQuestionBtn.addEventListener('click', () => {
     if (state.exam.currentQuestionNumber >= TOTAL_QUESTIONS) {
       finishAndShowReport();
@@ -714,13 +915,16 @@ function bindEvents() {
   dom.exitVivaBtn.addEventListener('click', () => {
     const confirmed = window.confirm('Exit the current viva? Your in-progress answers will not be saved.');
     if (confirmed) {
-      showView('setup');
+      exitToSetup();
     }
   });
 
-  dom.restartVivaBtn.addEventListener('click', () => {
-    showView('setup');
+  dom.retryReportBtn.addEventListener('click', () => {
+    finishAndShowReport();
   });
+
+  dom.reportBackBtn.addEventListener('click', exitToSetup);
+  dom.restartVivaBtn.addEventListener('click', exitToSetup);
 }
 
 function init() {
@@ -728,7 +932,7 @@ function init() {
   updateNotesMetrics();
   renderHistory();
   bindEvents();
-  testBackendConnection();
+  testBackendConnection({ allowLocalFallback: true });
 }
 
 init();

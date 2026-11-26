@@ -6,6 +6,7 @@
 export const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 export const MAX_EXTRACTED_CHARS = 40000;
 export const MIN_NOTES_CHARS = 50;
+export const MAX_ANSWER_CHARS = 5000;
 
 const PDF_WORKER_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
@@ -29,7 +30,7 @@ async function extractTxt(file) {
 }
 
 async function extractPdf(file) {
-  const pdfjsLib = window.pdfjsLib;
+  const pdfjsLib = typeof window !== 'undefined' ? window.pdfjsLib : null;
   if (!pdfjsLib) {
     throw new Error('PDF extraction library failed to load. Check your internet connection or paste your notes manually.');
   }
@@ -52,11 +53,17 @@ async function extractPdf(file) {
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum += 1) {
     const page = await pdf.getPage(pageNum);
     const content = await page.getTextContent();
-    const strings = content.items
-      .map((item) => (typeof item.str === 'string' ? item.str : ''))
-      .filter(Boolean);
-    if (strings.length > 0) {
-      pageTexts.push(strings.join(' '));
+    let pageBuffer = '';
+    for (const item of content.items || []) {
+      const str = typeof item?.str === 'string' ? item.str : '';
+      if (str) {
+        pageBuffer += str;
+      }
+      pageBuffer += item?.hasEOL ? '\n' : ' ';
+    }
+    const cleanedPage = normalizeExtractedText(pageBuffer);
+    if (cleanedPage) {
+      pageTexts.push(cleanedPage);
     }
   }
 
@@ -64,7 +71,7 @@ async function extractPdf(file) {
 }
 
 async function extractDocx(file) {
-  const mammoth = window.mammoth;
+  const mammoth = typeof window !== 'undefined' ? window.mammoth : null;
   if (!mammoth) {
     throw new Error('DOCX extraction library failed to load. Check your internet connection or paste your notes manually.');
   }
@@ -111,9 +118,12 @@ export async function extractTextFromFile(file) {
   }
 
   if (!extractedText) {
-    throw new Error(
-      `No readable text could be extracted from "${file.name}". If this is a scanned image PDF, please paste your notes manually.`
-    );
+    if (ext === 'pdf') {
+      throw new Error(
+        `No readable text could be extracted from "${file.name}". If this is a scanned image PDF, please paste your notes manually.`
+      );
+    }
+    throw new Error(`No readable text could be found in "${file.name}". Please upload a file containing study notes.`);
   }
 
   let truncated = false;

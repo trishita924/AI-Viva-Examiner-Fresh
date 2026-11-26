@@ -102,7 +102,7 @@
             <!-- Backend Connection Card -->
             <div class="card">
               <h2 class="card-title">2. Backend Connection</h2>
-              <p class="card-desc">Connect to your local Express server or deployed Render backend URL.</p>
+              <p class="card-desc">Connects automatically when served by the backend, or enter your local / Render backend URL.</p>
               <div class="field-group">
                 <label for="backend-url-input" class="field-label">Backend API URL</label>
                 <div class="input-row">
@@ -167,9 +167,13 @@
           </div>
 
           <div id="exam-error-banner" class="alert alert-error hidden" role="alert"></div>
+          <div id="exam-error-actions" class="error-actions hidden">
+            <button type="button" id="retry-question-btn" class="btn btn-secondary btn-sm">Retry Loading Question</button>
+            <button type="button" id="error-exit-viva-btn" class="btn btn-ghost btn-sm">Back to Setup</button>
+          </div>
 
           <!-- Question Card -->
-          <div class="card question-card">
+          <div id="question-card" class="card question-card">
             <div class="question-badges">
               <span id="question-topic-badge" class="topic-badge">Topic</span>
               <span id="question-type-badge" class="type-badge">Conceptual</span>
@@ -189,10 +193,11 @@
                 id="answer-textarea"
                 class="answer-editor"
                 rows="6"
+                maxlength="5000"
                 placeholder="Write a clear, structured explanation based on your study notes..."
               ></textarea>
               <div class="answer-actions">
-                <span class="helper-text">Aim for clear reasoning and key terms from your notes.</span>
+                <span class="helper-text">Aim for clear reasoning and key terms from your notes (Ctrl+Enter to submit).</span>
                 <button type="button" id="submit-answer-btn" class="btn btn-primary">Submit Answer</button>
               </div>
             </div>
@@ -214,10 +219,11 @@
                 id="followup-textarea"
                 class="answer-editor"
                 rows="4"
+                maxlength="5000"
                 placeholder="Clarify or expand on the missing concept..."
               ></textarea>
               <div class="answer-actions">
-                <span class="helper-text">Your original and follow-up answers will be evaluated together.</span>
+                <span class="helper-text">Your original and follow-up answers will be evaluated together (Ctrl+Enter to submit).</span>
                 <button type="button" id="submit-followup-btn" class="btn btn-primary">Submit Follow-Up</button>
               </div>
             </div>
@@ -270,6 +276,10 @@
           </div>
 
           <div id="report-error-banner" class="alert alert-error hidden" role="alert"></div>
+          <div id="report-error-actions" class="error-actions hidden">
+            <button type="button" id="retry-report-btn" class="btn btn-primary btn-sm">Retry Final Report</button>
+            <button type="button" id="report-back-btn" class="btn btn-secondary btn-sm">Back to Setup</button>
+          </div>
 
           <div id="report-content">
             <!-- Hero Score Summary -->

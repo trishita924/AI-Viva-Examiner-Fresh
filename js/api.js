@@ -5,8 +5,10 @@
 
 import { getSavedBackendUrl, saveBackendUrl } from './storage.js';
 
-const REQUEST_TIMEOUT_MS = 40000;
+const REQUEST_TIMEOUT_MS = 50000;
+const HEALTH_TIMEOUT_MS = 15000;
 const inFlightKeys = new Set();
+let healthAbortController = null;
 
 export class ApiError extends Error {
   constructor(message, status = 0, code = 'NETWORK_ERROR') {
@@ -27,9 +29,14 @@ export function setBackendBaseUrl(url) {
 
 /**
  * Validates and normalizes a user-entered backend URL.
+ * Strips accidental trailing slashes or `/api` suffixes.
  */
 export function validateBackendUrl(rawUrl) {
-  const trimmed = (rawUrl || '').trim().replace(/\/+$/, '');
+  const trimmed = (rawUrl || '')
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/api(?:\/health)?$/i, '');
+
   if (!trimmed) {
     return { valid: false, error: 'Please enter a backend URL (e.g., http://localhost:3001 or your Render URL).' };
   }
@@ -45,13 +52,16 @@ export function validateBackendUrl(rawUrl) {
 }
 
 /**
- * Core JSON fetch wrapper with timeout, duplicate submission prevention, and structured errors.
+ * Core JSON fetch wrapper with timeout, abort support, duplicate submission prevention, and structured errors.
  */
-async function requestJson(endpoint, { method = 'GET', body = null, dedupeKey = null } = {}) {
-  const baseUrl = getBackendBaseUrl();
+async function requestJson(
+  endpoint,
+  { method = 'GET', body = null, dedupeKey = null, timeoutMs = REQUEST_TIMEOUT_MS, signal = null, baseUrlOverride = null } = {}
+) {
+  const baseUrl = baseUrlOverride ?? getBackendBaseUrl();
   if (!baseUrl) {
     throw new ApiError(
-      'Backend URL is not configured. Enter your backend URL in the Connection Settings panel.',
+      'Backend URL is not configured. Enter your backend URL in the Backend Connection panel.',
       0,
       'BACKEND_URL_MISSING'
     );
@@ -66,18 +76,35 @@ async function requestJson(endpoint, { method = 'GET', body = null, dedupeKey = 
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let didTimeout = false;
+  let externalAborted = false;
+
+  const onExternalAbort = () => {
+    externalAborted = true;
+    controller.abort();
+  };
+
+  if (signal) {
+    if (signal.aborted) {
+      if (dedupeKey) inFlightKeys.delete(dedupeKey);
+      throw new ApiError('Request was cancelled.', 0, 'ABORTED');
+    }
+    signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+
+  const timeoutId = setTimeout(() => {
+    didTimeout = true;
+    controller.abort();
+  }, timeoutMs);
 
   try {
     const options = {
       method,
-      headers: {
-        'Content-Type': 'application/json'
-      },
       signal: controller.signal
     };
 
     if (body !== null) {
+      options.headers = { 'Content-Type': 'application/json' };
       options.body = JSON.stringify(body);
     }
 
@@ -101,7 +128,10 @@ async function requestJson(endpoint, { method = 'GET', body = null, dedupeKey = 
     if (err instanceof ApiError) {
       throw err;
     }
-    if (err.name === 'AbortError') {
+    if (err?.name === 'AbortError') {
+      if (externalAborted && !didTimeout) {
+        throw new ApiError('Request was cancelled.', 0, 'ABORTED');
+      }
       throw new ApiError('Request timed out while waiting for the Gemini backend.', 504, 'TIMEOUT');
     }
     throw new ApiError(
@@ -111,21 +141,42 @@ async function requestJson(endpoint, { method = 'GET', body = null, dedupeKey = 
     );
   } finally {
     clearTimeout(timeoutId);
+    if (signal) {
+      signal.removeEventListener('abort', onExternalAbort);
+    }
     if (dedupeKey) {
       inFlightKeys.delete(dedupeKey);
     }
   }
 }
 
-export async function checkHealth() {
-  return requestJson('/api/health', { method: 'GET', dedupeKey: 'health' });
+export async function checkHealth({ timeoutMs = HEALTH_TIMEOUT_MS, baseUrlOverride = null } = {}) {
+  if (healthAbortController) {
+    healthAbortController.abort();
+  }
+  const controller = new AbortController();
+  healthAbortController = controller;
+
+  try {
+    return await requestJson('/api/health', {
+      method: 'GET',
+      timeoutMs,
+      signal: controller.signal,
+      baseUrlOverride
+    });
+  } finally {
+    if (healthAbortController === controller) {
+      healthAbortController = null;
+    }
+  }
 }
 
-export async function generateQuestion({ notes, questionNumber, totalQuestions = 5, previousQuestions = [] }) {
+export async function generateQuestion({ notes, questionNumber, totalQuestions = 5, previousQuestions = [], signal = null }) {
   return requestJson('/api/generate-question', {
     method: 'POST',
     body: { notes, questionNumber, totalQuestions, previousQuestions },
-    dedupeKey: `generate-question-${questionNumber}`
+    dedupeKey: `generate-question-${questionNumber}`,
+    signal
   });
 }
 
@@ -137,7 +188,8 @@ export async function evaluateAnswer({
   isFollowUp = false,
   originalAnswer = '',
   followUpQuestion = '',
-  followUpCount = 0
+  followUpCount = 0,
+  signal = null
 }) {
   return requestJson('/api/evaluate-answer', {
     method: 'POST',
@@ -151,14 +203,16 @@ export async function evaluateAnswer({
       followUpQuestion,
       followUpCount
     },
-    dedupeKey: 'evaluate-answer'
+    dedupeKey: 'evaluate-answer',
+    signal
   });
 }
 
-export async function generateReport({ evaluations }) {
+export async function generateReport({ evaluations, signal = null }) {
   return requestJson('/api/generate-report', {
     method: 'POST',
     body: { evaluations },
-    dedupeKey: 'generate-report'
+    dedupeKey: 'generate-report',
+    signal
   });
 }

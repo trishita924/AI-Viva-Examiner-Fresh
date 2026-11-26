@@ -283,6 +283,21 @@ p {
   border-radius: 999px;
 }
 
+.meta-badge.is-warning {
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #FCD34D;
+}
+
+.meta-badge.is-error {
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #FCA5A5;
+}
+
+.meta-badge.is-valid {
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #6EE7B7;
+}
+
 .notes-editor,
 .answer-editor,
 .text-input {
@@ -507,6 +522,18 @@ p {
   background: var(--success-soft);
   border-color: rgba(16, 185, 129, 0.35);
   color: #6EE7B7;
+}
+
+.error-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.exam-container .alert,
+.report-container .alert {
+  margin-top: 0;
 }
 
 /* ==================== VIVA EXAMINATION ==================== */
